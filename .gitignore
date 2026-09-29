@@ -1,0 +1,43 @@
+# Python bytecode and build output
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local credentials and certificates
+**/config/api_keys.json
+**/config/certs/
+**/config/whatsapp_web/
+**/token*.json
+**/client_secret*.json
+*credentials*.json
+.env
+.env.*
+
+# Personal assistant data
+**/memory/long_term.json
+**/memory/*.db
+
+# Runtime output
+**/*.log
+**/logs/
+**/downloads/
+**/screenshots/
+
+# Editors and operating systems
+**/.vscode/
+**/.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
