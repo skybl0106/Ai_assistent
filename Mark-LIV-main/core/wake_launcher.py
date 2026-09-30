@@ -9,8 +9,10 @@ import subprocess
 import sys
 import threading
 
-APP_DIR = Path(__file__).resolve().parent.parent
-MAIN_SCRIPT = APP_DIR / "main.py"
+_FROZEN = getattr(sys, "frozen", False)
+APP_DIR = (Path(sys.executable).resolve().parent if _FROZEN
+           else Path(__file__).resolve().parent.parent)
+MAIN_SCRIPT = None if _FROZEN else APP_DIR / "main.py"
 LOG_PATH = Path.home() / ".buddy" / "wake_launcher.log"
 
 
@@ -29,11 +31,16 @@ def _logger() -> logging.Logger:
 def _find_buddy_process():
     try:
         import psutil
-        target = MAIN_SCRIPT.resolve()
-        for process in psutil.process_iter(["cmdline", "cwd"]):
+        target = Path(sys.executable).resolve() if _FROZEN else MAIN_SCRIPT.resolve()
+        for process in psutil.process_iter(["cmdline", "cwd", "exe"]):
             try:
                 arguments = process.info.get("cmdline") or []
                 if process.pid == os.getpid() or "--wake-listener" in arguments:
+                    continue
+                if _FROZEN:
+                    executable = process.info.get("exe")
+                    if executable and Path(executable).resolve() == target:
+                        return process
                     continue
                 cwd = Path(process.info.get("cwd") or APP_DIR)
                 for argument in arguments:
@@ -123,8 +130,9 @@ def main() -> int:
         environment = os.environ.copy()
         environment["BUDDY_WAKE_LAUNCH"] = "1"
         try:
+            command = [sys.executable] if _FROZEN else [sys.executable, str(MAIN_SCRIPT)]
             process = subprocess.Popen(
-                [sys.executable, str(MAIN_SCRIPT)],
+                command,
                 cwd=APP_DIR,
                 env=environment,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

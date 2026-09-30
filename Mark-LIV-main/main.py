@@ -662,6 +662,7 @@ class JarvisLive:
         self.ui.on_wake_toggle   = self._ui_wake_toggle   # (enable: bool) -> str
         self.ui.on_wake_manual   = self._ui_wake_manual   # () -> toggle awake/asleep
         self.ui.on_wake_install  = self._ui_wake_install  # () -> (ok, msg)
+        self.ui.on_window_close  = self._ui_window_close
 
     # ── Wake word: state machine ─────────────────────────────────────────────
 
@@ -685,6 +686,7 @@ class JarvisLive:
 
     def _on_wake_detected(self) -> None:
         """Called from the detector thread when a Geni wake phrase is heard."""
+        self.ui.show_after_wake()
         self.wake(reason="wake word")
 
     def wake(self, reason: str = "wake word") -> None:
@@ -695,16 +697,34 @@ class JarvisLive:
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
         self.ui.write_log(f"SYS: Awake — {reason}.")
+        if hasattr(self.ui, "refresh_wake_state"):
+            self.ui.refresh_wake_state()
         if reason == "wake word":
-            self.speak(_WAKE_GREETING_PROMPT)
+            prompt = (
+                f"The user just woke you by saying your wake word. Greet them briefly as {self._asst_name} "
+                "in their preferred language, use their name if you know it, and invite their request."
+            )
+            self.speak(prompt)
 
     def sleep(self, reason: str = "timeout") -> None:
         if not self._awake:
             return
         self._awake = False
+        if self.audio_in_queue is not None:
+            while True:
+                try:
+                    self.audio_in_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
         self.set_speaking(False)
+        self._visemes.reset()
+        self._play_cursor = 0.0
         self.ui.set_state("SLEEPING")
         self.ui.write_log(f"SYS: Sleeping — {reason}. Say 'Hi Geni' to wake me.")
+        if hasattr(self.ui, "refresh_wake_state"):
+            self.ui.refresh_wake_state()
+        if self._wake_detector is not None:
+            self._wake_detector.reset()
 
     async def _run_sleep_watch(self) -> None:
         """Auto-sleep after the configured silence window (wake-word mode only)."""
@@ -746,6 +766,10 @@ class JarvisLive:
             self.sleep(reason="you tapped sleep")
         else:
             self.wake(reason="you tapped wake")
+
+    def _ui_window_close(self) -> None:
+        if self._wake_enabled:
+            self.sleep(reason="window closed")
 
     def _ui_wake_install(self) -> tuple[bool, str]:
         """Download Vosk and its local English model in a UI worker thread."""
@@ -1319,10 +1343,10 @@ class JarvisLive:
             # only a queue push, so the audio path is never slowed. When wake word
             # is off (default) or we're awake, this is a single boolean check.
             if self._wake_enabled:
-                det = self._wake_detector
-                if det is not None:
-                    det.feed(indata)
                 if not self._awake:
+                    det = self._wake_detector
+                    if det is not None:
+                        det.feed(indata)
                     return
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
@@ -1492,7 +1516,7 @@ class JarvisLive:
                             self._resume_handle = _sru.new_handle
 
                     if response.data:
-                        if self._interrupted:
+                        if self._interrupted or (self._wake_enabled and not self._awake):
                             pass  # discard: interrupted
                         else:
                             if self._turn_done_event and self._turn_done_event.is_set():

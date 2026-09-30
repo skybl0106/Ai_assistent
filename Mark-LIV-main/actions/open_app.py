@@ -1,3 +1,6 @@
+import json
+import os
+import re
 import time
 import subprocess
 import platform
@@ -78,40 +81,62 @@ def _normalize(raw: str) -> str:
     return raw  
 
 def _launch_windows(app_name: str) -> bool:
-
-    if shutil.which(app_name) or shutil.which(app_name.split(".")[0]):
+    executable = shutil.which(app_name)
+    if executable or os.path.isfile(app_name):
         try:
             subprocess.Popen(
-                app_name,
-                shell=True,
+                [executable or app_name],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            time.sleep(1.5)
             return True
         except Exception as e:
             print(f"[open_app] subprocess failed: {e}")
 
     if ":" in app_name:
         try:
-            subprocess.Popen(f"start {app_name}", shell=True)
-            time.sleep(1.0)
+            os.startfile(app_name)
             return True
         except Exception:
             pass
 
     try:
-        import pyautogui
-        pyautogui.PAUSE = 0.1
-        pyautogui.press("win")
-        time.sleep(0.7)
-        pyautogui.write(app_name, interval=0.05)
-        time.sleep(0.9)
-        pyautogui.press("enter")
-        time.sleep(2.5)
-        return True
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                "Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            apps = json.loads(result.stdout)
+            if isinstance(apps, dict):
+                apps = [apps]
+            query = re.sub(r"[^a-z0-9]", "", app_name.casefold())
+            candidates = [
+                app for app in apps
+                if isinstance(app, dict)
+                and isinstance(app.get("Name"), str)
+                and isinstance(app.get("AppID"), str)
+                and query in re.sub(r"[^a-z0-9]", "", app["Name"].casefold())
+            ]
+            if candidates:
+                candidates.sort(
+                    key=lambda app: (
+                        re.sub(r"[^a-z0-9]", "", app["Name"].casefold()) != query,
+                        len(app["Name"]),
+                    )
+                )
+                subprocess.Popen(
+                    ["explorer.exe", f"shell:AppsFolder\\{candidates[0]['AppID']}"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
     except Exception as e:
-        print(f"[open_app] Start Menu search failed: {e}")
+        print(f"[open_app] Windows app lookup failed: {e}")
 
     return False
 

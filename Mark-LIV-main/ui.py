@@ -2928,6 +2928,8 @@ class MainWindow(QMainWindow):
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
+    _wake_refresh_sig = pyqtSignal()         # wake-word state changed (awake/asleep)
+    _wake_show_sig  = pyqtSignal()            # restore window after wake phrase
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
     _review_sig     = pyqtSignal(str, str, object, object)  # document review payload
@@ -2966,6 +2968,7 @@ class MainWindow(QMainWindow):
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
+        self.on_window_close   = None   # callable: () -> None, set by JarvisLive
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self.wake_get_state    = None   # callable: () -> dict {enabled, awake, ready}
@@ -3087,6 +3090,8 @@ class MainWindow(QMainWindow):
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
+        self._wake_refresh_sig.connect(self._refresh_wake_btns)
+        self._wake_show_sig.connect(self._show_after_wake)
         self._quiz_sig.connect(self._show_quiz)
         self._quiz_hide_sig.connect(self._hide_quiz)
         self._review_sig.connect(self._show_review)
@@ -3111,6 +3116,28 @@ class MainWindow(QMainWindow):
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
+
+    def closeEvent(self, event):
+        try:
+            from memory.config_manager import get_wake_word_enabled
+            wake_enabled = get_wake_word_enabled()
+        except Exception:
+            wake_enabled = False
+        if wake_enabled:
+            if self.on_window_close:
+                self.on_window_close()
+            event.ignore()
+            self.hide()
+            return
+        super().closeEvent(event)
+
+    def _show_after_wake(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def show_after_wake(self):
+        self._wake_show_sig.emit()
 
     def _show_camera_frame(self, img_bytes: bytes):
         """Slot — display camera preview overlay (main thread)."""
@@ -5230,6 +5257,9 @@ class JarvisUI:
         self.root = _RootShim(self._app)
         self._win.show()
 
+    def show_after_wake(self) -> None:
+        self._win.show_after_wake()
+
     @property
     def muted(self) -> bool:
         return self._win._muted
@@ -5445,3 +5475,7 @@ class JarvisUI:
     def stop_speaking(self):
         if not self.muted:
             self.set_state("LISTENING")
+
+    def refresh_wake_state(self):
+        """Thread-safe: refresh wake button states in the UI."""
+        self._win._wake_refresh_sig.emit()

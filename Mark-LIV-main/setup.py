@@ -84,12 +84,13 @@ def _build_exe() -> None:
 
     command = [
         sys.executable, "-m", "PyInstaller",
-        "--noconfirm", "--clean", "--onedir",
+        "--noconfirm", "--clean", "--onedir", "--windowed",
+        "--contents-directory", ".",
         "--name", "GENI",
         "--paths", str(HERE),
-        "--add-data", f"{HERE / 'config'};config",
         "--add-data", f"{HERE / 'dashboard' / 'static'};dashboard/static",
         "--add-data", f"{HERE / 'core' / 'prompt.txt'};core",
+        "--add-data", f"{HERE / 'core' / 'face_model.obj'};core",
         *sum((["--hidden-import", module] for module in hidden_imports), []),
         str(HERE / "main.py"),
     ]

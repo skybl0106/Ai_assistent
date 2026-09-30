@@ -10,12 +10,24 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import zipfile
 from pathlib import Path
 from typing import Callable
 from urllib.request import urlopen
 
-WAKE_PHRASES = ("hi geni", "hi genie", "hey geni", "hey genie")
+WAKE_PHRASES = (
+    # Geni and its phonetic recognitions in Vosk
+    "hi geni", "hi genie", "hey geni", "hey genie", "hello geni", "hello genie", "ok geni", "okay geni",
+    "hi jenny", "hey jenny", "hello jenny", "ok jenny", "okay jenny",
+    "hi ginny", "hey ginny", "hello ginny", "ok ginny", "okay ginny",
+    # Jarvis
+    "hi jarvis", "hey jarvis", "hello jarvis", "ok jarvis", "okay jarvis", "jarvis",
+    # Buddy
+    "hi buddy", "hey buddy", "hello buddy", "ok buddy", "okay buddy",
+    # System
+    "wake up", "computer",
+)
 WAKE_PHRASE = WAKE_PHRASES[0]
 SAMPLE_RATE = 16000
 MODEL_NAME = "vosk-model-small-en-us-0.15"
@@ -84,7 +96,7 @@ def install_and_download(logger: Callable[[str], None] = print,
         return False, f"wake-word setup failed: {exc}"
 
 
-def _matches_wake_result(result_json: str) -> bool:
+def _matches_wake_result(result_json: str, custom_phrases: tuple[str, ...] = ()) -> bool:
     try:
         result = json.loads(result_json)
     except (TypeError, json.JSONDecodeError):
@@ -92,8 +104,25 @@ def _matches_wake_result(result_json: str) -> bool:
     if not isinstance(result, dict):
         return False
 
-    recognized = " ".join(re.findall(r"[a-z]+", str(result.get("text", "")).lower()))
-    return recognized in WAKE_PHRASES
+    raw_text = str(result.get("text") or result.get("partial") or "").strip()
+    if not raw_text:
+        return False
+
+    tokens = [w for w in re.findall(r"[a-z]+", raw_text.lower()) if w != "unk"]
+    if not tokens:
+        return False
+
+    # Normalize 'geni' -> 'genie'
+    norm_tokens = ["genie" if t == "geni" else t for t in tokens]
+
+    all_targets = WAKE_PHRASES + tuple(custom_phrases)
+    for phrase in all_targets:
+        target_words = ["genie" if w == "geni" else w for w in phrase.lower().split()]
+        k = len(target_words)
+        for i in range(len(norm_tokens) - k + 1):
+            if norm_tokens[i:i+k] == target_words:
+                return True
+    return False
 
 
 class WakeWordDetector:
@@ -111,6 +140,7 @@ class WakeWordDetector:
         self._model = None
         self._recognizer = None
         self._ready = False
+        self._last_trigger: float = 0.0
 
     def start(self) -> bool:
         """Load the local model and start recognition. Safe to call repeatedly."""
@@ -120,8 +150,30 @@ class WakeWordDetector:
             import vosk
             vosk.SetLogLevel(-1)
             self._model = vosk.Model(str(MODEL_DIR))
+
+            # Build grammar using only words that exist in the acoustic model's vocabulary.
+            # Including missing words (like 'geni') causes Vosk to drop them and leave single
+            # words like 'hi' or 'hey', which corrupts the grammar and breaks recognition.
+            candidates = list(WAKE_PHRASES)
+            try:
+                from memory.config_manager import get_assistant_name
+                asst = (get_assistant_name() or "").strip().lower()
+                if asst:
+                    for prefix in ("hi", "hey", "hello", "ok", "okay"):
+                        candidates.append(f"{prefix} {asst}")
+                    candidates.append(asst)
+            except Exception:
+                pass
+
+            valid_grammar = []
+            for phrase in candidates:
+                words = phrase.split()
+                if words and all(self._model.vosk_model_find_word(w) != -1 for w in words):
+                    if phrase not in valid_grammar:
+                        valid_grammar.append(phrase)
+
             self._recognizer = vosk.KaldiRecognizer(
-                self._model, SAMPLE_RATE, json.dumps([*WAKE_PHRASES, "[unk]"])
+                self._model, SAMPLE_RATE, json.dumps([*valid_grammar, "[unk]"])
             )
         except Exception as exc:
             self._logger(f"Wake word: could not load model — {exc}")
@@ -146,6 +198,15 @@ class WakeWordDetector:
         self._recognizer = None
         self._ready = False
 
+    def reset(self) -> None:
+        """Reset recognizer state and drain queue for a fresh start."""
+        self._drain()
+        if self._recognizer is not None:
+            try:
+                self._recognizer.Reset()
+            except Exception:
+                pass
+
     @property
     def ready(self) -> bool:
         return self._ready
@@ -157,7 +218,14 @@ class WakeWordDetector:
         try:
             data = (frame_int16[:, 0].copy() if getattr(frame_int16, "ndim", 1) > 1
                     else frame_int16.copy())
-            self._queue.put_nowait(data)
+            try:
+                self._queue.put_nowait(data)
+            except queue.Full:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+                self._queue.put_nowait(data)
         except Exception:
             pass
 
@@ -169,15 +237,24 @@ class WakeWordDetector:
                 if frame is None or not self._running:
                     break
                 audio = np.asarray(frame, dtype=np.int16).reshape(-1).tobytes()
-                if not self._recognizer.AcceptWaveform(audio):
-                    continue
-                if _matches_wake_result(self._recognizer.Result()):
-                    self._recognizer.Reset()
-                    self._drain()
-                    try:
-                        self._on_detect()
-                    except Exception as exc:
-                        self._logger(f"Wake word: on_detect error — {exc}")
+
+                matched = False
+                if self._recognizer.AcceptWaveform(audio):
+                    matched = _matches_wake_result(self._recognizer.Result())
+                else:
+                    matched = _matches_wake_result(self._recognizer.PartialResult())
+
+                if matched:
+                    now = time.monotonic()
+                    if now - self._last_trigger >= 1.2:
+                        self._last_trigger = now
+                        self._recognizer.Reset()
+                        self._drain()
+                        self._logger("Wake word: detected!")
+                        try:
+                            self._on_detect()
+                        except Exception as exc:
+                            self._logger(f"Wake word: on_detect error — {exc}")
             except Exception as exc:
                 self._logger(f"Wake word: inference error — {exc}")
 
